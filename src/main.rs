@@ -24,6 +24,7 @@ struct Cli {
 enum Commands {
     Dream(DreamCommands),
     Stats,
+    Daily,
 }
 
 #[derive(Args)]
@@ -74,6 +75,7 @@ fn main() -> anyhow::Result<()> {
             DreamActions::View { id } => view_dream(id),
             DreamActions::Search { keyword } => search_dreams(&keyword),
         },
+        Commands::Daily => daily_report(),
         Commands::Stats => show_statistics(),
     }
 }
@@ -257,6 +259,109 @@ fn show_statistics() -> anyhow::Result<()> {
     dates.sort_by_key(|d| d.0);
     for (date, count) in dates.iter().take(30) {
         println!("{}: {} {}", date, "★".repeat(**count as usize), count);
+    }
+    
+    Ok(())
+}
+
+fn daily_report() -> anyhow::Result<()> {
+    let mut dreams = load_dreams()?;
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    
+    print!("Do you remember a dream? (y/n): ");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    
+    if answer.trim().eq_ignore_ascii_case("y") {
+        let id = dreams.last().map_or(1, |d| d.id + 1);
+        
+        print!("Dream title: ");
+        io::stdout().flush()?;
+        let mut title = String::new();
+        io::stdin().read_line(&mut title)?;
+        
+        println!("Dream content (Ctrl+D when finished):");
+        let mut content = String::new();
+        io::stdin().read_to_string(&mut content)?;
+        
+        print!("Was it a lucid dream? (y/n): ");
+        io::stdout().flush()?;
+        let mut lucid = String::new();
+        io::stdin().read_line(&mut lucid)?;
+        let is_lucid = lucid.trim().eq_ignore_ascii_case("y");
+        
+        print!("How do you feel after waking up?: ");
+        io::stdout().flush()?;
+        let mut feeling = String::new();
+        io::stdin().read_line(&mut feeling)?;
+        
+        print!("Did you notice any dream sign? (optional): ");
+        io::stdout().flush()?;
+        let mut sign = String::new();
+        io::stdin().read_line(&mut sign)?;
+        
+        let mut tags = vec![];
+        if is_lucid {
+            tags.push("#lucid".to_string());
+        }
+        
+        let new_dream = Dream {
+            id,
+            date: today,
+            title: title.trim().to_string(),
+            content: content.trim().to_string(),
+            tags,
+            lucid: Some(is_lucid),
+            dream_sign: if sign.trim().is_empty() {
+                None
+            } else {
+                Some(sign.trim().to_string())
+            },
+        };
+        
+        dreams.push(new_dream);
+        save_dreams(&dreams)?;
+        println!("\nMorning report completed. Dream #{} recorded.", id);
+    } else {
+        println!("No dream recorded today.");
+    }
+    
+    update_statistics()?;
+    generate_weekly_report()?;
+    Ok(())
+}
+
+fn generate_weekly_report() -> anyhow::Result<()> {
+    let dreams = load_dreams()?;
+    let now = Utc::now();
+    let one_week_ago = now - chrono::Duration::days(7);
+    
+    let weekly_dreams: Vec<_> = dreams.iter()
+        .filter(|d| {
+            if let Ok(dream_date) = NaiveDate::parse_from_str(&d.date, "%Y-%m-%d") {
+                let dream_datetime = dream_date.and_hms_opt(0, 0, 0).unwrap();
+                dream_datetime >= one_week_ago.naive_utc()
+            } else {
+                false
+            }
+        })
+        .collect();
+    
+    let lucid_count = weekly_dreams.iter()
+        .filter(|d| d.tags.contains(&"#lucid".to_string()))
+        .count();
+    
+    println!("\n--- Weekly Report ---");
+    println!("Dreams this week: {}", weekly_dreams.len());
+    println!("Lucid dreams: {}", lucid_count);
+    println!("Dream frequency: {:.1} per day", weekly_dreams.len() as f32 / 7.0);
+    
+    if !weekly_dreams.is_empty() {
+        let total_words: usize = weekly_dreams.iter()
+            .map(|d| d.content.split_whitespace().count())
+            .sum();
+        println!("Average dream length: {} words", total_words / weekly_dreams.len());
     }
     
     Ok(())
