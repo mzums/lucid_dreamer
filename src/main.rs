@@ -7,9 +7,12 @@ use std::{
     io::{self, Write, Read},
     path::Path,
 };
+use rand::seq::SliceRandom;
 
 const DREAMS_FILE: &str = "dreams.json";
+const CONFIG_FILE: &str = "config.json";
 const STATS_FILE: &str = "stats.json";
+const PROMPTS_FILE: &str = "prompts.txt";
 
 #[derive(Parser)]
 #[command(name = "Lucid Dreamer")]
@@ -25,6 +28,7 @@ enum Commands {
     Dream(DreamCommands),
     Stats,
     Daily,
+    RealityCheck,
 }
 
 #[derive(Args)]
@@ -77,6 +81,7 @@ fn main() -> anyhow::Result<()> {
         },
         Commands::Daily => daily_report(),
         Commands::Stats => show_statistics(),
+        Commands::RealityCheck => reality_check(),
     }
 }
 
@@ -364,5 +369,40 @@ fn generate_weekly_report() -> anyhow::Result<()> {
         println!("Average dream length: {} words", total_words / weekly_dreams.len());
     }
     
+    Ok(())
+}
+
+fn load_config() -> anyhow::Result<Config> {
+    if Path::new(PROMPTS_FILE).exists() {
+        let prompts = fs::read_to_string(PROMPTS_FILE)?
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        
+        return Ok(Config {
+            reality_check_prompts: prompts,
+        });
+    }
+    
+    if Path::new(CONFIG_FILE).exists() {
+        let data = fs::read_to_string(CONFIG_FILE)?;
+        return Ok(serde_json::from_str(&data)?);
+    }
+    
+    Ok(Config::default())
+}
+
+fn reality_check() -> anyhow::Result<()> {
+    let config = load_config()?;
+    if config.reality_check_prompts.is_empty() {
+        return Err(anyhow::anyhow!("No reality check prompts found"));
+    }
+    
+    let prompt = config.reality_check_prompts
+        .choose(&mut rand::thread_rng())
+        .unwrap();
+    
+    println!("\nREALITY CHECK: {}\n", prompt);
     Ok(())
 }
