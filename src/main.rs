@@ -34,6 +34,8 @@ struct DreamCommands {
 enum DreamActions {
     Add,
     List,
+    View { id: u32 },
+    Search { keyword: String },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -67,6 +69,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Dream(dream_cmd) => match dream_cmd.action {
             DreamActions::Add => add_dream(),
             DreamActions::List => list_dreams(),
+            DreamActions::View { id } => view_dream(id),
+            DreamActions::Search { keyword } => search_dreams(&keyword),
         },
     }
 }
@@ -121,6 +125,52 @@ fn list_dreams() -> anyhow::Result<()> {
     for dream in dreams {
         let tags = dream.tags.join(", ");
         println!("{:<5} {:<12} {:<30} {:<20}", dream.id, dream.date, dream.title, tags);
+    }
+    
+    Ok(())
+}
+
+fn view_dream(id: u32) -> anyhow::Result<()> {
+    let dreams = load_dreams()?;
+    if let Some(dream) = dreams.iter().find(|d| d.id == id) {
+        println!("\n--- Dream #{} ---", dream.id);
+        println!("Date: {}", dream.date);
+        println!("Title: {}", dream.title);
+        println!("Tags: {}", dream.tags.join(", "));
+        println!("\nContent:\n{}\n", dream.content);
+        
+        if let Some(sign) = &dream.dream_sign {
+            println!("Dream sign: {}", sign);
+        }
+        if let Some(lucid) = dream.lucid {
+            println!("Lucid: {}", lucid);
+        }
+    } else {
+        println!("Dream #{} not found.", id);
+    }
+    
+    Ok(())
+}
+
+fn search_dreams(keyword: &str) -> anyhow::Result<()> {
+    let dreams = load_dreams()?;
+    let keyword = keyword.to_lowercase();
+    let mut found = false;
+    
+    for dream in dreams {
+        if dream.title.to_lowercase().contains(&keyword) || 
+           dream.content.to_lowercase().contains(&keyword) ||
+           dream.tags.iter().any(|t| t.to_lowercase().contains(&keyword)) {
+            println!("\n--- Dream #{} ---", dream.id);
+            println!("Date: {}", dream.date);
+            println!("Title: {}", dream.title);
+            println!("Tags: {}", dream.tags.join(", "));
+            found = true;
+        }
+    }
+    
+    if !found {
+        println!("No dreams found matching '{}'", keyword);
     }
     
     Ok(())
