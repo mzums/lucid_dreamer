@@ -9,6 +9,7 @@ use std::{
 };
 
 const DREAMS_FILE: &str = "dreams.json";
+const STATS_FILE: &str = "stats.json";
 
 #[derive(Parser)]
 #[command(name = "Lucid Dreamer")]
@@ -22,6 +23,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Dream(DreamCommands),
+    Stats,
 }
 
 #[derive(Args)]
@@ -72,6 +74,7 @@ fn main() -> anyhow::Result<()> {
             DreamActions::View { id } => view_dream(id),
             DreamActions::Search { keyword } => search_dreams(&keyword),
         },
+        Commands::Stats => show_statistics(),
     }
 }
 
@@ -110,6 +113,8 @@ fn add_dream() -> anyhow::Result<()> {
     dreams.push(new_dream);
     save_dreams(&dreams)?;
     println!("Dream #{} added successfully!", id);
+
+    update_statistics()?;
     
     Ok(())
 }
@@ -187,5 +192,72 @@ fn load_dreams() -> anyhow::Result<Vec<Dream>> {
 fn save_dreams(dreams: &[Dream]) -> anyhow::Result<()> {
     let data = serde_json::to_string_pretty(dreams)?;
     fs::write(DREAMS_FILE, data)?;
+    Ok(())
+}
+
+fn update_statistics() -> anyhow::Result<()> {
+    let dreams = load_dreams()?;
+    let mut stats = if Path::new(STATS_FILE).exists() {
+        let data = fs::read_to_string(STATS_FILE)?;
+        serde_json::from_str(&data)?
+    } else {
+        Statistics::default()
+    };
+    
+    stats.total_dreams = dreams.len() as u32;
+    stats.lucid_dreams = dreams.iter()
+        .filter(|d| d.tags.contains(&"#lucid".to_string()))
+        .count() as u32;
+    
+    for dream in &dreams {
+        for word in dream.content.split_whitespace() {
+            let word = word.to_lowercase();
+            *stats.common_words.entry(word).or_insert(0) += 1;
+        }
+    }
+    
+    for dream in &dreams {
+        let date = dream.date.clone();
+        *stats.dream_calendar.entry(date).or_insert(0) += 1;
+    }
+    
+    let data = serde_json::to_string_pretty(&stats)?;
+    fs::write(STATS_FILE, data)?;
+    Ok(())
+}
+
+fn show_statistics() -> anyhow::Result<()> {
+    let stats: Statistics = if Path::new(STATS_FILE).exists() {
+        let data = fs::read_to_string(STATS_FILE)?;
+        serde_json::from_str(&data)?
+    } else {
+        Statistics::default()
+    };
+    
+    println!("\n--- Dream Statistics ---");
+    println!("Total dreams: {}", stats.total_dreams);
+    println!("Lucid dreams: {} ({:.1}%)", 
+        stats.lucid_dreams,
+        if stats.total_dreams > 0 {
+            (stats.lucid_dreams as f32 / stats.total_dreams as f32) * 100.0
+        } else {
+            0.0
+        }
+    );
+    
+    let mut words: Vec<_> = stats.common_words.iter().collect();
+    words.sort_by(|a, b| b.1.cmp(a.1));
+    println!("\nMost frequent dream words:");
+    for (i, (word, count)) in words.iter().take(10).enumerate() {
+        println!("{}. {} ({} occurrences)", i + 1, word, count);
+    }
+    
+    println!("\nDream calendar:");
+    let mut dates: Vec<_> = stats.dream_calendar.iter().collect();
+    dates.sort_by_key(|d| d.0);
+    for (date, count) in dates.iter().take(30) {
+        println!("{}: {} {}", date, "★".repeat(**count as usize), count);
+    }
+    
     Ok(())
 }
