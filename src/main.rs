@@ -13,6 +13,7 @@ const DREAMS_FILE: &str = "dreams.json";
 const CONFIG_FILE: &str = "config.json";
 const STATS_FILE: &str = "stats.json";
 const PROMPTS_FILE: &str = "prompts.txt";
+const DAILY_LOG_FILE: &str = "daily_logs.json";
 
 #[derive(Parser)]
 #[command(name = "Lucid Dreamer")]
@@ -43,6 +44,25 @@ enum DreamActions {
     List,
     View { id: u32 },
     Search { keyword: String },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct SleepLog {
+    date: String,
+    bedtime: String,
+    wake_time: String,
+    quality: u8,
+    notes: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct DailyLog {
+    date: String,
+    dream: Option<Dream>,
+    sleep: Option<SleepLog>,
+    wake_feeling: Option<String>,
+    reality_checks: u32,
+    notes: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -79,9 +99,9 @@ fn main() -> anyhow::Result<()> {
             DreamActions::View { id } => view_dream(id),
             DreamActions::Search { keyword } => search_dreams(&keyword),
         },
-        Commands::Daily => daily_report(),
         Commands::Stats => show_statistics(),
         Commands::RealityCheck => reality_check(),
+        Commands::Daily => daily_entry(),
     }
 }
 
@@ -234,51 +254,219 @@ fn update_statistics() -> anyhow::Result<()> {
 }
 
 fn show_statistics() -> anyhow::Result<()> {
-    let stats: Statistics = if Path::new(STATS_FILE).exists() {
-        let data = fs::read_to_string(STATS_FILE)?;
-        serde_json::from_str(&data)?
-    } else {
-        Statistics::default()
-    };
+    let dreams = load_dreams()?;
+    let daily_logs = load_daily_logs()?;
     
-    println!("\n--- Dream Statistics ---");
-    println!("Total dreams: {}", stats.total_dreams);
+    let sleep_logs: Vec<_> = daily_logs.iter()
+        .filter_map(|log| log.sleep.as_ref())
+        .collect();
+    
+    println!("\n--- DREAM & SLEEP STATISTICS ---");
+    
+    println!("\nDREAM STATS:");
+    println!("Total dreams recorded: {}", dreams.len());
+    
+    let lucid_dreams = dreams.iter()
+        .filter(|d| d.lucid == Some(true))
+        .count();
     println!("Lucid dreams: {} ({:.1}%)", 
-        stats.lucid_dreams,
-        if stats.total_dreams > 0 {
-            (stats.lucid_dreams as f32 / stats.total_dreams as f32) * 100.0
+        lucid_dreams,
+        if !dreams.is_empty() {
+            (lucid_dreams as f32 / dreams.len() as f32) * 100.0
         } else {
             0.0
         }
     );
     
-    let mut words: Vec<_> = stats.common_words.iter().collect();
-    words.sort_by(|a, b| b.1.cmp(a.1));
-    println!("\nMost frequent dream words:");
-    for (i, (word, count)) in words.iter().take(10).enumerate() {
-        println!("{}. {} ({} occurrences)", i + 1, word, count);
+    if !dreams.is_empty() {
+        let total_words: usize = dreams.iter()
+            .map(|d| d.content.split_whitespace().count())
+            .sum();
+        println!("Average dream length: {} words", total_words / dreams.len());
     }
     
-    println!("\nDream calendar:");
-    let mut dates: Vec<_> = stats.dream_calendar.iter().collect();
-    dates.sort_by_key(|d| d.0);
-    for (date, count) in dates.iter().take(30) {
+    let mut word_counts = HashMap::new();
+    for dream in &dreams {
+        for word in dream.content.split_whitespace() {
+            let word = word.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()).to_string();
+            if !word.is_empty() {
+                *word_counts.entry(word).or_insert(0) += 1;
+            }
+        }
+    }
+    
+    let mut sorted_words: Vec<_> = word_counts.iter().collect();
+    sorted_words.sort_by(|a, b| b.1.cmp(a.1));
+    
+    if !sorted_words.is_empty() {
+        println!("\nMost frequent dream words:");
+        for (i, (word, count)) in sorted_words.iter().take(10).enumerate() {
+            println!("{}. {} ({} occurrences)", i + 1, word, count);
+        }
+    }
+    
+    println!("\nSLEEP STATS:");
+    if sleep_logs.is_empty() {
+        println!("No sleep data recorded yet.");
+    } else {
+        let mut total_duration = 0.0;
+        let mut total_quality = 0.0;
+        let mut sleep_durations = Vec::new();
+        
+        for log in &sleep_logs {
+            if let Ok(bedtime) = NaiveTime::parse_from_str(&log.bedtime, "%H:%M") {
+                if let Ok(wake_time) = NaiveTime::parse_from_str(&log.wake_time, "%H:%M") {
+                    let mut duration = (wake_time - bedtime).num_minutes() as f32 / 60.0;
+                    if duration < 0.0 {
+                        duration += 24.0;
+                    }
+                    total_duration += duration;
+                    sleep_durations.push(duration);
+                }
+            }
+            total_quality += log.quality as f32;
+        }
+        
+        let avg_duration = total_duration / sleep_logs.len() as f32;
+        let avg_quality = total_quality / sleep_logs.len() as f32;
+        
+        let min_duration = sleep_durations.iter().fold(f32::INFINITY, |a, &b| a.min(b));
+        let max_duration = sleep_durations.iter().fold(0.0_f32, |a, &b| a.max(b));
+        
+        println!("Nights tracked: {}", sleep_logs.len());
+        println!("Average sleep duration: {:.1} hours", avg_duration);
+        println!("Min sleep: {:.1}h, Max sleep: {:.1}h", min_duration, max_duration);
+        println!("Average sleep quality: {:.1}/5", avg_quality);
+        
+        let lucid_nights = daily_logs.iter()
+            .filter(|log| 
+                log.dream.as_ref().map_or(false, |d| d.lucid == Some(true)) &&
+                log.sleep.is_some()
+            )
+            .count();
+        
+        if lucid_nights > 0 {
+            println!("\nLucid dreams occurred on {:.1}% of tracked nights", 
+                (lucid_nights as f32 / sleep_logs.len() as f32) * 100.0);
+        }
+        
+        let lucid_quality: f32 = daily_logs.iter()
+            .filter_map(|log| 
+                if log.dream.as_ref().map_or(false, |d| d.lucid == Some(true)) {
+                    log.sleep.as_ref().map(|s| s.quality as f32)
+                } else {
+                    None
+                }
+            )
+            .sum();
+        
+        if lucid_nights > 0 {
+            println!("Average sleep quality on lucid nights: {:.1}/5", 
+                lucid_quality / lucid_nights as f32);
+        }
+        
+        println!("\nSleep duration consistency:");
+        for duration in sleep_durations.iter().take(30) {
+            println!("{:.1}h: {}", duration, "▇".repeat((*duration * 2.0) as usize));
+        }
+    }
+    
+    println!("\nREALITY CHECKS:");
+    let total_rc: u32 = daily_logs.iter().map(|log| log.reality_checks).sum();
+    println!("Total reality checks recorded: {}", total_rc);
+    
+    if !daily_logs.is_empty() {
+        let avg_rc = total_rc as f32 / daily_logs.len() as f32;
+        println!("Average per day: {:.1}", avg_rc);
+        
+        let max_rc = daily_logs.iter().map(|log| log.reality_checks).max().unwrap_or(0);
+        let min_rc = daily_logs.iter().map(|log| log.reality_checks).min().unwrap_or(0);
+        println!("Most active day: {} checks, Least active: {}", max_rc, min_rc);
+    }
+    
+    println!("\nDREAM CALENDAR:");
+    let mut dream_calendar = HashMap::new();
+    for dream in &dreams {
+        *dream_calendar.entry(dream.date.clone()).or_insert(0) += 1;
+    }
+    
+    let mut sorted_dates: Vec<_> = dream_calendar.iter().collect();
+    sorted_dates.sort_by_key(|(date, _)| (*date).clone());
+
+    for (date, count) in sorted_dates.iter().take(30) {
         println!("{}: {} {}", date, "★".repeat(**count as usize), count);
     }
     
     Ok(())
 }
 
-fn daily_report() -> anyhow::Result<()> {
-    let mut dreams = load_dreams()?;
+fn load_daily_logs() -> anyhow::Result<Vec<DailyLog>> {
+    if !Path::new(DAILY_LOG_FILE).exists() {
+        return Ok(Vec::new());
+    }
+    let data = fs::read_to_string(DAILY_LOG_FILE)?;
+    Ok(serde_json::from_str(&data)?)
+}
+
+fn daily_entry() -> anyhow::Result<()> {
     let today = Utc::now().format("%Y-%m-%d").to_string();
+    let mut logs = load_daily_logs()?;
     
+    if let Some(log) = logs.iter().find(|l| l.date == today) {
+        println!("Daily entry already exists for today:");
+        print_daily_summary(log);
+        print!("Do you want to update it? (y/n): ");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            return Ok(());
+        }
+    }
+
+    let mut new_log = DailyLog {
+        date: today.clone(),
+        dream: None,
+        sleep: None,
+        wake_feeling: None,
+        reality_checks: 0,
+        notes: String::new(),
+    };
+
+    println!("\n--- SLEEP LOG ---");
+    print!("Bedtime last night (HH:MM): ");
+    io::stdout().flush()?;
+    let mut bedtime = String::new();
+    io::stdin().read_line(&mut bedtime)?;
+    
+    print!("Wake time today (HH:MM): ");
+    io::stdout().flush()?;
+    let mut wake_time = String::new();
+    io::stdin().read_line(&mut wake_time)?;
+    
+    print!("Sleep quality (1-5): ");
+    io::stdout().flush()?;
+    let mut quality_input = String::new();
+    io::stdin().read_line(&mut quality_input)?;
+    let quality = quality_input.trim().parse::<u8>()?.clamp(1, 5);
+    
+    new_log.sleep = Some(SleepLog {
+        date: today.clone(),
+        bedtime: bedtime.trim().to_string(),
+        wake_time: wake_time.trim().to_string(),
+        quality,
+        notes: String::new(),
+    });
+
+    println!("\n--- DREAM RECALL ---");
     print!("Do you remember a dream? (y/n): ");
     io::stdout().flush()?;
     let mut answer = String::new();
     io::stdin().read_line(&mut answer)?;
     
     if answer.trim().eq_ignore_ascii_case("y") {
+        let mut dreams = load_dreams()?;
         let id = dreams.last().map_or(1, |d| d.id + 1);
         
         print!("Dream title: ");
@@ -296,11 +484,6 @@ fn daily_report() -> anyhow::Result<()> {
         io::stdin().read_line(&mut lucid)?;
         let is_lucid = lucid.trim().eq_ignore_ascii_case("y");
         
-        print!("How do you feel after waking up?: ");
-        io::stdout().flush()?;
-        let mut feeling = String::new();
-        io::stdin().read_line(&mut feeling)?;
-        
         print!("Did you notice any dream sign? (optional): ");
         io::stdout().flush()?;
         let mut sign = String::new();
@@ -311,9 +494,9 @@ fn daily_report() -> anyhow::Result<()> {
             tags.push("#lucid".to_string());
         }
         
-        let new_dream = Dream {
+        let dream = Dream {
             id,
-            date: today,
+            date: today.clone(),
             title: title.trim().to_string(),
             content: content.trim().to_string(),
             tags,
@@ -325,15 +508,47 @@ fn daily_report() -> anyhow::Result<()> {
             },
         };
         
-        dreams.push(new_dream);
+        dreams.push(dream.clone());
         save_dreams(&dreams)?;
-        println!("\nMorning report completed. Dream #{} recorded.", id);
-    } else {
-        println!("No dream recorded today.");
+        new_log.dream = Some(dream);
     }
+
+    println!("\n--- DAILY METRICS ---");
+    print!("How do you feel after waking up?: ");
+    io::stdout().flush()?;
+    let mut feeling = String::new();
+    io::stdin().read_line(&mut feeling)?;
+    new_log.wake_feeling = Some(feeling.trim().to_string());
+    
+    print!("Number of reality checks performed: ");
+    io::stdout().flush()?;
+    let mut rc_input = String::new();
+    io::stdin().read_line(&mut rc_input)?;
+    new_log.reality_checks = rc_input.trim().parse().unwrap_or(0);
+    
+    println!("Additional notes (optional):");
+    let mut notes = String::new();
+    io::stdin().read_line(&mut notes)?;
+    new_log.notes = notes.trim().to_string();
+
+    if let Some(index) = logs.iter().position(|l| l.date == today) {
+        logs[index] = new_log;
+    } else {
+        logs.push(new_log);
+    }
+    
+    save_daily_logs(&logs)?;
+    println!("\nDaily entry completed!");
     
     update_statistics()?;
     generate_weekly_report()?;
+    
+    Ok(())
+}
+
+fn save_daily_logs(logs: &[DailyLog]) -> anyhow::Result<()> {
+    let data = serde_json::to_string_pretty(logs)?;
+    fs::write(DAILY_LOG_FILE, data)?;
     Ok(())
 }
 
@@ -405,4 +620,30 @@ fn reality_check() -> anyhow::Result<()> {
     
     println!("\nREALITY CHECK: {}\n", prompt);
     Ok(())
+}
+
+fn print_daily_summary(log: &DailyLog) {
+    println!("\n--- DAILY SUMMARY FOR {} ---", log.date);
+    
+    if let Some(sleep) = &log.sleep {
+        println!("🛏️  Sleep: {} to {} (Quality: {}/5)", 
+            sleep.bedtime, sleep.wake_time, sleep.quality);
+    }
+    
+    if let Some(dream) = &log.dream {
+        println!("💤 Dream: {} - {}", dream.title, 
+            if dream.lucid == Some(true) { "(Lucid)" } else { "" });
+    } else {
+        println!("💤 No dream recalled");
+    }
+    
+    if let Some(feeling) = &log.wake_feeling {
+        println!("Wake feeling: {}", feeling);
+    }
+    
+    println!("🔍 Reality checks: {}", log.reality_checks);
+    
+    if !log.notes.is_empty() {
+        println!("Notes: {}", log.notes);
+    }
 }
