@@ -8,12 +8,15 @@ use std::{
     path::Path,
 };
 use rand::seq::SliceRandom;
+use crossterm::event;
+use crossterm::event::{Event, KeyCode};
 
 const DREAMS_FILE: &str = "dreams.json";
 const CONFIG_FILE: &str = "config.json";
 const STATS_FILE: &str = "stats.json";
 const PROMPTS_FILE: &str = "prompts.txt";
 const DAILY_LOG_FILE: &str = "daily_logs.json";
+const TECHNIQUES_FILE: &str = "techniques.json";
 
 #[derive(Parser)]
 #[command(name = "Lucid Dreamer")]
@@ -27,6 +30,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Dream(DreamCommands),
+    Train(TrainCommands),
     Stats,
     Daily,
     RealityCheck,
@@ -89,6 +93,28 @@ struct Statistics {
     dream_calendar: HashMap<String, u32>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct TechniqueData {
+    name: String,
+    description: String,
+    steps: Vec<String>,
+    last_practiced: Option<String>,
+}
+
+#[derive(Subcommand, Clone)]
+enum Technique {
+    Mild,
+    Wbtb,
+    Fild,
+    Rc,
+}
+
+#[derive(Args)]
+struct TrainCommands {
+    #[command(subcommand)]
+    technique: Technique,
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -98,6 +124,12 @@ fn main() -> anyhow::Result<()> {
             DreamActions::List => list_dreams(),
             DreamActions::View { id } => view_dream(id),
             DreamActions::Search { keyword } => search_dreams(&keyword),
+        },
+        Commands::Train(train_cmd) => match train_cmd.technique {
+            Technique::Mild => practice_technique(Technique::Mild),
+            Technique::Wbtb => practice_technique(Technique::Wbtb),
+            Technique::Fild => practice_technique(Technique::Fild),
+            Technique::Rc => practice_technique(Technique::Rc),
         },
         Commands::Stats => show_statistics(),
         Commands::RealityCheck => reality_check(),
@@ -626,24 +658,130 @@ fn print_daily_summary(log: &DailyLog) {
     println!("\n--- DAILY SUMMARY FOR {} ---", log.date);
     
     if let Some(sleep) = &log.sleep {
-        println!("🛏️  Sleep: {} to {} (Quality: {}/5)", 
+        println!("Sleep: {} to {} (Quality: {}/5)", 
             sleep.bedtime, sleep.wake_time, sleep.quality);
     }
     
     if let Some(dream) = &log.dream {
-        println!("💤 Dream: {} - {}", dream.title, 
+        println!("Dream: {} - {}", dream.title, 
             if dream.lucid == Some(true) { "(Lucid)" } else { "" });
     } else {
-        println!("💤 No dream recalled");
+        println!("No dream recalled");
     }
     
     if let Some(feeling) = &log.wake_feeling {
         println!("Wake feeling: {}", feeling);
     }
     
-    println!("🔍 Reality checks: {}", log.reality_checks);
+    println!("Reality checks: {}", log.reality_checks);
     
     if !log.notes.is_empty() {
         println!("Notes: {}", log.notes);
     }
+}
+
+fn load_techniques() -> anyhow::Result<HashMap<String, TechniqueData>> {
+    if Path::new(TECHNIQUES_FILE).exists() {
+        let data = fs::read_to_string(TECHNIQUES_FILE)?;
+        return Ok(serde_json::from_str(&data)?);
+    }
+    
+    let mut techniques = HashMap::new();
+    
+    techniques.insert("MILD".to_string(), TechniqueData {
+        name: "Mnemonic Induction of Lucid Dreams (MILD)".to_string(),
+        description: "A technique that uses prospective memory to increase lucid dream frequency".to_string(),
+        steps: vec![
+            "Set intention to remember you're dreaming".to_string(),
+            "Visualize yourself becoming lucid in a recent dream".to_string(),
+            "Repeat a mantra like 'Next time I'm dreaming, I'll remember I'm dreaming'".to_string(),
+            "Fall asleep while maintaining this intention".to_string(),
+        ],
+        last_practiced: None,
+    });
+    
+    techniques.insert("WBTB".to_string(), TechniqueData {
+        name: "Wake Back To Bed (WBTB)".to_string(),
+        description: "Wake up after 4-6 hours of sleep, stay awake briefly, then return to sleep".to_string(),
+        steps: vec![
+            "Set alarm for 4-6 hours after bedtime".to_string(),
+            "When alarm goes off, stay awake for 20-60 minutes".to_string(),
+            "Engage in lucid dream preparation activities".to_string(),
+            "Return to sleep while maintaining awareness".to_string(),
+        ],
+        last_practiced: None,
+    });
+    
+    techniques.insert("FILD".to_string(), TechniqueData {
+        name: "Finger Induced Lucid Dream (FILD)".to_string(),
+        description: "A subtle finger movement technique to enter directly into a lucid dream".to_string(),
+        steps: vec![
+            "Wake up after 4-6 hours of sleep".to_string(),
+            "Lie completely still".to_string(),
+            "Gently move index and middle fingers as if playing piano".to_string(),
+            "After 10-20 seconds, perform a reality check".to_string(),
+        ],
+        last_practiced: None,
+    });
+    
+    techniques.insert("RC".to_string(), TechniqueData {
+        name: "Reality Checks".to_string(),
+        description: "Habitual checks throughout the day to test if you're dreaming".to_string(),
+        steps: vec![
+            "Perform 10+ reality checks daily".to_string(),
+            "Question your reality: 'Am I dreaming?'".to_string(),
+            "Examine your environment for dream signs".to_string(),
+            "Try to push finger through palm or read text twice".to_string(),
+        ],
+        last_practiced: None,
+    });
+    
+    Ok(techniques)
+}
+
+fn save_techniques(techniques: &HashMap<String, TechniqueData>) -> anyhow::Result<()> {
+    let data = serde_json::to_string_pretty(techniques)?;
+    fs::write(TECHNIQUES_FILE, data)?;
+    Ok(())
+}
+
+fn practice_technique(technique: Technique) -> anyhow::Result<()> {
+    let technique_name = match technique {
+        Technique::Mild => "MILD",
+        Technique::Wbtb => "WBTB",
+        Technique::Fild => "FILD",
+        Technique::Rc => "RC",
+    };
+    
+    let mut techniques = load_techniques()?;
+    let tech = techniques.get_mut(technique_name)
+        .ok_or_else(|| anyhow::anyhow!("Technique not found"))?;
+    
+    println!("\n--- Practicing {} ---", tech.name);
+    println!("{}\n", tech.description);
+    println!("Steps:");
+    for (i, step) in tech.steps.iter().enumerate() {
+        println!("{}. {}", i + 1, step);
+    }
+    
+    tech.last_practiced = Some(Utc::now().format("%Y-%m-%d").to_string());
+    save_techniques(&techniques)?;
+    
+    println!("\nPractice started at {}", Utc::now().format("%H:%M"));
+    println!("Press any key to complete practice...");
+    wait_for_keypress()?;
+    
+    println!("\n✅ Practice completed! Remember to record results in your dream journal.");
+    Ok(())
+}
+
+fn wait_for_keypress() -> anyhow::Result<()> {
+    loop {
+        if let Event::Key(event) = event::read()? {
+            if event.code != KeyCode::Null {
+                break;
+            }
+        }
+    }
+    Ok(())
 }
