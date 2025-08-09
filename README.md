@@ -39,7 +39,8 @@ Lucid Dreamer is a comprehensive terminal-based tool designed to help you track,
 
 ## Installation
 
-Install the binary from [release section](https://github.com/mzums/lucid_dreamer/releases)
+Download [Unix binary](https://hc-cdn.hel1.your-objectstorage.com/s/v3/57db2c4a99c09bca74aa82f7ba198830411c3fda_lucid_dreamer) or  
+Download [Windows .exe](https://hc-cdn.hel1.your-objectstorage.com/s/v3/c426bbcf2736fce81bccbf73747d51dcfa18ad5b_lucid_dreamer.exe) or  
 
 1. Ensure you have Rust installed
 2. Clone the repository:
