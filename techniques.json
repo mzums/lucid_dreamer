@@ -1,0 +1,46 @@
+{
+  "WBTB": {
+    "name": "Wake Back To Bed (WBTB)",
+    "description": "Wake up after 4-6 hours of sleep, stay awake briefly, then return to sleep",
+    "steps": [
+      "Set alarm for 4-6 hours after bedtime",
+      "When alarm goes off, stay awake for 20-60 minutes",
+      "Engage in lucid dream preparation activities",
+      "Return to sleep while maintaining awareness"
+    ],
+    "last_practiced": null
+  },
+  "MILD": {
+    "name": "Mnemonic Induction of Lucid Dreams (MILD)",
+    "description": "A technique that uses prospective memory to increase lucid dream frequency",
+    "steps": [
+      "Set intention to remember you're dreaming",
+      "Visualize yourself becoming lucid in a recent dream",
+      "Repeat a mantra like 'Next time I'm dreaming, I'll remember I'm dreaming'",
+      "Fall asleep while maintaining this intention"
+    ],
+    "last_practiced": null
+  },
+  "FILD": {
+    "name": "Finger Induced Lucid Dream (FILD)",
+    "description": "A subtle finger movement technique to enter directly into a lucid dream",
+    "steps": [
+      "Wake up after 4-6 hours of sleep",
+      "Lie completely still",
+      "Gently move index and middle fingers as if playing piano",
+      "After 10-20 seconds, perform a reality check"
+    ],
+    "last_practiced": null
+  },
+  "RC": {
+    "name": "Reality Checks",
+    "description": "Habitual checks throughout the day to test if you're dreaming",
+    "steps": [
+      "Perform 10+ reality checks daily",
+      "Question your reality: 'Am I dreaming?'",
+      "Examine your environment for dream signs",
+      "Try to push finger through palm or read text twice"
+    ],
+    "last_practiced": null
+  }
+}
