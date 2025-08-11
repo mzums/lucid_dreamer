@@ -46,7 +46,7 @@ Download [Windows .exe](https://hc-cdn.hel1.your-objectstorage.com/s/v3/c426bbcf
 2. Clone the repository:
    ```bash
    git clone https://github.com/mzums/lucid_dreamer.git
-   cd lucid-dreamer
+   cd lucid_dreamer
    ```
 3. Build the project:
    ```bash
@@ -54,7 +54,7 @@ Download [Windows .exe](https://hc-cdn.hel1.your-objectstorage.com/s/v3/c426bbcf
    ```
 4. Run the executable:
    ```bash
-   ./target/release/lucid_dreamer
+   ./target/release/lucid-dreamer
    ```
 
 ## Usage
