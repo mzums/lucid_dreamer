@@ -63,28 +63,28 @@ Download [Windows .exe](https://hc-cdn.hel1.your-objectstorage.com/s/v3/c426bbcf
 
 ```bash
 # Start your daily entry (sleep + dreams)
-lucid-dreamer daily
+cargo run -- daily
 
 # Add a dream directly
-lucid-dreamer dream add
+cargo run -- dream add
 
 # List all dreams
-lucid-dreamer dream list
+cargo run -- dream list
 
 # View dream details
-lucid-dreamer dream view 5
+cargo run -- dream view 5
 
 # Search dreams
-lucid-dreamer dream search flying
+cargo run -- dream search flying
 
 # Show comprehensive statistics
-lucid-dreamer stats
+cargo run -- stats
 
 # Practice a lucid dreaming technique
-lucid-dreamer train mild
+cargo run -- train mild
 
 # Get a reality check prompt
-lucid-dreamer reality-check
+cargo run -- reality-check
 ```
 
 ### Data Storage
