@@ -6,10 +6,16 @@ use std::{
     fs,
     io::{self, Write, Read},
     path::Path,
+    process::Command,
+    thread,
+    time::{Duration, SystemTime},
 };
 use rand::seq::SliceRandom;
 use crossterm::event;
 use crossterm::event::{Event, KeyCode};
+use chrono::{Utc, NaiveTime};
+use std::process::Stdio;
+use std::sync::Arc;
 
 const DREAMS_FILE: &str = "dreams.json";
 const CONFIG_FILE: &str = "config.json";
@@ -17,6 +23,11 @@ const STATS_FILE: &str = "stats.json";
 const PROMPTS_FILE: &str = "prompts.txt";
 const DAILY_LOG_FILE: &str = "daily_logs.json";
 const TECHNIQUES_FILE: &str = "techniques.json";
+const ALARMS_FILE: &str = "alarms.json";
+const TECHNIQUE_HISTORY_FILE: &str = "technique_history.json";
+
+use std::sync::atomic::{AtomicBool, Ordering};
+static ALARM_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Parser)]
 #[command(name = "Lucid Dreamer")]
@@ -34,6 +45,9 @@ enum Commands {
     Stats,
     Daily,
     RealityCheck,
+    Alarm(AlarmCommands),
+    Analyze,
+    Report,
 }
 
 #[derive(Args)]
@@ -48,6 +62,34 @@ enum DreamActions {
     List,
     View { id: u32 },
     Search { keyword: String },
+}
+
+#[derive(Args)]
+struct AlarmCommands {
+    #[command(subcommand)]
+    action: AlarmActions,
+}
+
+#[derive(Subcommand)]
+enum AlarmActions {
+    Set {
+        #[arg(short, long)]
+        bedtime: String,
+        #[arg(short, long)]
+        wake_time: String,
+        #[arg(short, long, default_value = "30")]
+        awake_minutes: u32,
+    },
+    List,
+    Cancel {
+        id: u32,
+    },
+}
+
+#[derive(Args)]
+struct TrainCommands {
+    #[command(subcommand)]
+    technique: Technique,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -67,6 +109,8 @@ struct DailyLog {
     wake_feeling: Option<String>,
     reality_checks: u32,
     notes: String,
+    technique_practice: Option<TechniquePractice>,
+    wbtb_alarm_used: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -91,6 +135,16 @@ struct Statistics {
     lucid_dreams: u32,
     common_words: HashMap<String, u32>,
     dream_calendar: HashMap<String, u32>,
+    technique_effectiveness: HashMap<String, TechniqueStats>,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug)]
+struct TechniqueStats {
+    attempts: u32,
+    successes: u32,
+    last_practiced: String,
+    success_rate: f32,
+    optimal_conditions: HashMap<String, f32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -101,6 +155,23 @@ struct TechniqueData {
     last_practiced: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct TechniquePractice {
+    technique: String,
+    date: String,
+    duration_minutes: u32,
+    outcome: TechniqueOutcome,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type", content = "data")]
+enum TechniqueOutcome {
+    Unattempted,
+    Failed,
+    PartialLucid,
+    FullLucid { control_level: u8 },
+}
+
 #[derive(Subcommand, Clone)]
 enum Technique {
     Mild,
@@ -109,32 +180,438 @@ enum Technique {
     Rc,
 }
 
-#[derive(Args)]
-struct TrainCommands {
-    #[command(subcommand)]
-    technique: Technique,
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct WBTBAlarm {
+    id: u32,
+    bedtime: String,
+    wake_time: String,
+    awake_minutes: u32,
+    enabled: bool,
+    last_triggered: Option<String>,
+    success: Option<bool>,
+}
+
+fn schedule_alarm(wake_time: &str, awake_minutes: u32) -> anyhow::Result<()> {
+    let now = Utc::now();
+    let wake_naive = NaiveTime::parse_from_str(wake_time, "%H:%M")?;
+    
+    let today = now.date_naive();
+    let wake_today = today.and_time(wake_naive);
+    let wake_utc = Utc.from_utc_datetime(&wake_today);
+    
+    let duration = if wake_utc > now {
+        wake_utc - now
+    } else {
+        let tomorrow = today.succ_opt().unwrap();
+        let wake_tomorrow = tomorrow.and_time(wake_naive);
+        Utc.from_utc_datetime(&wake_tomorrow) - now
+    };
+    
+    let secs = duration.num_seconds() as u64;
+    
+    println!("Alarm scheduled to trigger in {} seconds", secs);
+    
+    let wake_time = wake_time.to_string();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(secs));
+        trigger_alarm(&wake_time, awake_minutes);
+    });
+    
+    Ok(())
+}
+
+fn load_alarms() -> anyhow::Result<Vec<WBTBAlarm>> {
+    if !Path::new(ALARMS_FILE).exists() {
+        return Ok(Vec::new());
+    }
+    let data = fs::read_to_string(ALARMS_FILE)?;
+    Ok(serde_json::from_str(&data)?)
+}
+
+fn save_alarms(alarms: &[WBTBAlarm]) -> anyhow::Result<()> {
+    let data = serde_json::to_string_pretty(alarms)?;
+    fs::write(ALARMS_FILE, data)?;
+    Ok(())
+}
+
+fn set_wbtb_alarm(bedtime: &str, wake_time: &str, awake_minutes: u32) -> anyhow::Result<()> {
+    let mut alarms = load_alarms()?;
+    let id = alarms.last().map_or(1, |a| a.id + 1);
+    
+    let new_alarm = WBTBAlarm {
+        id,
+        bedtime: bedtime.to_string(),
+        wake_time: wake_time.to_string(),
+        awake_minutes,
+        enabled: true,
+        last_triggered: None,
+        success: None,
+    };
+    
+    alarms.push(new_alarm);
+    save_alarms(&alarms)?;
+    
+    println!("WBTB alarm set for bedtime: {}, wake at: {}, awake for {} minutes", 
+        bedtime, wake_time, awake_minutes);
+    
+    schedule_alarm(wake_time, awake_minutes)?;
+    
+    Ok(())
+}
+
+
+fn list_alarms() -> anyhow::Result<()> {
+    let alarms = load_alarms()?;
+    if alarms.is_empty() {
+        println!("No active alarms");
+        return Ok(());
+    }
+
+    println!("{:<5} {:<10} {:<10} {:<8}", "ID", "Sleep time", "Wake time", "Awake time");
+    for alarm in alarms {
+        println!("{:<5} {:<10} {:<10} {:<8} min", 
+            alarm.id, 
+            alarm.bedtime, 
+            alarm.wake_time, 
+            alarm.awake_minutes);
+    }
+    
+    Ok(())
+}
+
+fn cancel_alarm(id: u32) -> anyhow::Result<()> {
+    let mut alarms = load_alarms()?;
+    if let Some(index) = alarms.iter().position(|a| a.id == id) {
+        alarms.remove(index);
+        save_alarms(&alarms)?;
+        println!("Alarm #{} canceled.", id);
+    } else {
+        println!("Alarm #{} not found.", id);
+    }
+    Ok(())
+}
+
+fn trigger_alarm(wake_time: &str, awake_minutes: u32) {
+    ALARM_ACTIVE.store(true, Ordering::Relaxed);
+    
+    println!("\n\x1b[5;31m!!! WBTB ALARM !!!\x1b[0m");
+    println!("Wake Back to Bed Technique Time!");
+    println!("Stay awake for {} minutes", awake_minutes);
+    
+    play_alarm_sound();
+    
+    for _ in 0..10 {
+        print!("\x1b[?5h");
+        io::stdout().flush().unwrap();
+        thread::sleep(Duration::from_millis(200));
+        print!("\x1b[?5l");
+        io::stdout().flush().unwrap();
+        thread::sleep(Duration::from_millis(200));
+    }
+    
+    println!("\nAlarm triggered at {}", wake_time);
+    
+    let awake_minutes = Arc::new(awake_minutes);
+    let awake_minutes_clone = Arc::clone(&awake_minutes);
+    
+    thread::spawn(move || {
+        println!("\n\x1b[1;34mAWAKE PERIOD STARTED\x1b[0m");
+        println!("You have {} minutes to stay awake", awake_minutes_clone);
+        
+        for min in (1..=*awake_minutes_clone).rev() {
+            println!("{} minutes remaining...", min);
+            thread::sleep(Duration::from_secs(60));
+        }
+        
+        println!("\n\x1b[1;32mTIME TO RETURN TO SLEEP!\x1b[0m");
+        println!("Lie down, relax, and perform your lucid dream technique");
+        println!("Good luck with your lucid dream!");
+        
+        play_return_to_sleep_sound();
+        ALARM_ACTIVE.store(false, Ordering::Relaxed);
+    });
+}
+
+fn play_return_to_sleep_sound() {
+    if cfg!(target_os = "windows") {
+        let _ = Command::new("powershell")
+            .args(&["-c", "[console]::beep(500, 300)"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    } else {
+        print!("\x07");
+        std::io::stdout().flush().unwrap();
+    }
+}
+
+fn play_alarm_sound() {
+    if cfg!(target_os = "windows") {
+        let _ = Command::new("powershell")
+            .args(&["-c", "[console]::beep(1000, 1000)"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    } else {
+        print!("\x07");
+        std::io::stdout().flush().unwrap();
+        
+        if cfg!(target_os = "macos") {
+            let _ = Command::new("afplay")
+                .arg("/System/Library/Sounds/Ping.aiff")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        } else {
+            let _ = Command::new("paplay")
+                .arg("/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+fn load_technique_history() -> anyhow::Result<Vec<TechniquePractice>> {
+    if !Path::new(TECHNIQUE_HISTORY_FILE).exists() {
+        return Ok(Vec::new());
+    }
+    
+    let data = fs::read_to_string(TECHNIQUE_HISTORY_FILE)?;
+    let history = serde_json::from_str(&data).unwrap_or_else(|_| Vec::new());
+    Ok(history)
+}
+
+fn record_technique_practice(technique: &str, outcome: TechniqueOutcome, duration_minutes: u32) -> anyhow::Result<()> {
+    let mut history = load_technique_history().unwrap_or_default();
+    
+    let practice = TechniquePractice {
+        technique: technique.to_string(),
+        date: Utc::now().format("%Y-%m-%d").to_string(),
+        duration_minutes,
+        outcome,
+    };
+    
+    history.push(practice);
+    let data = serde_json::to_string_pretty(&history)?;
+    fs::write(TECHNIQUE_HISTORY_FILE, data)?;
+    
+    Ok(())
+}
+
+fn calculate_technique_effectiveness() -> anyhow::Result<HashMap<String, TechniqueStats>> {
+    let history = load_technique_history()?;
+    let mut stats: HashMap<String, TechniqueStats> = HashMap::new();
+    
+    for practice in history {
+        let entry = stats.entry(practice.technique.clone()).or_insert_with(|| TechniqueStats {
+            attempts: 0,
+            successes: 0,
+            last_practiced: practice.date.clone(),
+            success_rate: 0.0,
+            optimal_conditions: HashMap::new(),
+        });
+        
+        entry.attempts += 1;
+        
+        match practice.outcome {
+            TechniqueOutcome::PartialLucid | TechniqueOutcome::FullLucid { .. } => {
+                entry.successes += 1;
+            }
+            _ => {}
+        }
+        
+        if entry.attempts > 0 {
+            entry.success_rate = (entry.successes as f32 / entry.attempts as f32) * 100.0;
+        }
+    }
+    
+    for stat in stats.values_mut() {
+        for value in stat.optimal_conditions.values_mut() {
+            *value = (*value / stat.successes as f32) * 100.0;
+        }
+    }
+    
+    Ok(stats)
+}
+fn generate_effectiveness_report() -> anyhow::Result<()> {
+    let stats = calculate_technique_effectiveness()?;
+    
+    println!("\n\x1b[1;34mLUCID DREAM TECHNIQUE EFFECTIVENESS REPORT\x1b[0m");
+    println!("===============================================\n");
+    
+    for (technique, data) in &stats {
+        println!("\x1b[1;32m{} Technique\x1b[0m", technique);
+        println!("  Success Rate: \x1b[1;33m{:.1}%\x1b[0m ({} successes / {} attempts)", 
+            data.success_rate, data.successes, data.attempts);
+        println!("  Last Practiced: {}", data.last_practiced);
+        
+        if !data.optimal_conditions.is_empty() {
+            println!("\n  \x1b[1;36mOptimal Conditions:\x1b[0m");
+            for (condition, rate) in &data.optimal_conditions {
+                println!("    - {}: {:.1}% success rate", condition, rate);
+            }
+        }
+        
+        let recommendation = if data.success_rate > 70.0 {
+            "Continue using as primary technique".to_string()
+        } else if data.success_rate > 40.0 {
+            "Combine with another technique".to_string()
+        } else {
+            "Try modifying approach or switch techniques".to_string()
+        };
+        
+        println!("\n  \x1b[1;35mRecommendation:\x1b[0m {}", recommendation);
+        println!();
+    }
+    
+    if stats.len() > 1 {
+        println!("\x1b[1;34mTECHNIQUE COMPARISON\x1b[0m");
+        let mut sorted: Vec<_> = stats.iter().collect();
+        sorted.sort_by(|a, b| b.1.success_rate.partial_cmp(&a.1.success_rate).unwrap());
+        
+        println!("  Most Effective: \x1b[1;32m{}\x1b[0m ({:.1}% success)", 
+            sorted[0].0, sorted[0].1.success_rate);
+        println!("  Least Effective: \x1b[1;31m{}\x1b[0m ({:.1}% success)", 
+            sorted.last().unwrap().0, sorted.last().unwrap().1.success_rate);
+    }
+    
+    let mut all_stats: Statistics = if Path::new(STATS_FILE).exists() {
+        let data = fs::read_to_string(STATS_FILE)?;
+        serde_json::from_str(&data)?
+    } else {
+        Statistics::default()
+    };
+    
+    all_stats.technique_effectiveness = stats;
+    let data = serde_json::to_string_pretty(&all_stats)?;
+    fs::write(STATS_FILE, data)?;
+    
+    Ok(())
+}
+
+fn wait_for_keypress() -> anyhow::Result<()> {
+    loop {
+        if let Event::Key(event) = event::read()? {
+            if event.code != KeyCode::Null {
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let mut should_wait = false;
 
-    match cli.command {
-        Commands::Dream(dream_cmd) => match dream_cmd.action {
-            DreamActions::Add => add_dream(),
-            DreamActions::List => list_dreams(),
-            DreamActions::View { id } => view_dream(id),
-            DreamActions::Search { keyword } => search_dreams(&keyword),
-        },
-        Commands::Train(train_cmd) => match train_cmd.technique {
-            Technique::Mild => practice_technique(Technique::Mild),
-            Technique::Wbtb => practice_technique(Technique::Wbtb),
-            Technique::Fild => practice_technique(Technique::Fild),
-            Technique::Rc => practice_technique(Technique::Rc),
-        },
-        Commands::Stats => show_statistics(),
-        Commands::RealityCheck => reality_check(),
-        Commands::Daily => daily_entry(),
+    if let Commands::Alarm(AlarmCommands { action: AlarmActions::Set { bedtime, wake_time, awake_minutes } }) = &cli.command {
+        set_wbtb_alarm(bedtime, wake_time, *awake_minutes)?;
+        should_wait = true;
+    } else {
+        match cli.command {
+            Commands::Dream(dream_cmd) => match dream_cmd.action {
+                DreamActions::Add => add_dream()?,
+                DreamActions::List => list_dreams()?,
+                DreamActions::View { id } => view_dream(id)?,
+                DreamActions::Search { keyword } => search_dreams(&keyword)?,
+            },
+            Commands::Train(train_cmd) => match train_cmd.technique {
+                Technique::Mild => practice_technique("MILD")?,
+                Technique::Wbtb => practice_technique("WBTB")?,
+                Technique::Fild => practice_technique("FILD")?,
+                Technique::Rc => practice_technique("RC")?,
+            },
+            Commands::Stats => show_statistics()?,
+            Commands::RealityCheck => reality_check()?,
+            Commands::Daily => daily_entry()?,
+            Commands::Alarm(alarm_cmd) => match alarm_cmd.action {
+                AlarmActions::List => list_alarms()?,
+                AlarmActions::Cancel { id } => cancel_alarm(id)?,
+                _ => unreachable!(),
+            },
+            Commands::Analyze => calculate_technique_effectiveness().map(|_| ())?,
+            Commands::Report => generate_effectiveness_report()?,
+        }
     }
+
+    if should_wait {
+        println!("Alarm is active. Press 'q' to quit or wait for alarm...");
+        loop {
+            if event::poll(Duration::from_millis(100))? {
+                if let Event::Key(key_event) = event::read()? {
+                    if key_event.code == KeyCode::Char('q') {
+                        println!("Exiting program. Alarm will not trigger.");
+                        break;
+                    }
+                }
+            }
+            
+            if ALARM_ACTIVE.load(Ordering::Relaxed) {
+                println!("Alarm triggered. Waiting for awake period completion...");
+                
+                while ALARM_ACTIVE.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_secs(1));
+                }
+                
+                println!("Awake period completed. Program will now exit.");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+
+fn practice_technique(technique: &str) -> anyhow::Result<()> {
+    let mut techniques = load_techniques()?;
+    let tech = techniques.get_mut(technique)
+        .ok_or_else(|| anyhow::anyhow!("Technique not found"))?;
+    
+    println!("\n--- Practicing {} ---", tech.name);
+    println!("{}\n", tech.description);
+    println!("Steps:");
+    for (i, step) in tech.steps.iter().enumerate() {
+        println!("{}. {}", i + 1, step);
+    }
+    
+    let start_time = SystemTime::now();
+    tech.last_practiced = Some(Utc::now().format("%Y-%m-%d").to_string());
+    save_techniques(&techniques)?;
+    
+    println!("\nPractice started at {}", Utc::now().format("%H:%M"));
+    println!("Press any key to complete practice...");
+    wait_for_keypress()?;
+    
+    let duration = start_time.elapsed().unwrap().as_secs() / 60;
+    println!("\nPractice duration: {} minutes", duration);
+    
+    println!("Select outcome:");
+    println!("1. Failed (no lucidity)");
+    println!("2. Partial lucidity (brief awareness)");
+    println!("3. Full lucidity (complete control)");
+    
+    let mut choice = String::new();
+    io::stdin().read_line(&mut choice)?;
+    let outcome = match choice.trim() {
+        "1" => TechniqueOutcome::Failed,
+        "2" => TechniqueOutcome::PartialLucid,
+        "3" => {
+            print!("Control level (1-5): ");
+            io::stdout().flush()?;
+            let mut control = String::new();
+            io::stdin().read_line(&mut control)?;
+            let control_level = control.trim().parse().unwrap_or(3).clamp(1, 5);
+            TechniqueOutcome::FullLucid { control_level }
+        }
+        _ => TechniqueOutcome::Unattempted,
+    };
+    
+    record_technique_practice(technique, outcome, duration as u32)?;
+    
+    println!("\n✅ Practice recorded! Technique effectiveness updated.");
+    Ok(())
 }
 
 fn add_dream() -> anyhow::Result<()> {
@@ -429,6 +906,14 @@ fn show_statistics() -> anyhow::Result<()> {
         println!("{}: {} {}", date, "★".repeat(**count as usize), count);
     }
     
+    println!("\n\x1b[1;34mTECHNIQUE EFFECTIVENESS\x1b[0m");
+    if let Ok(stats) = calculate_technique_effectiveness() {
+        for (technique, data) in stats {
+            println!("  {}: {:.1}% success ({} attempts)", 
+                technique, data.success_rate, data.attempts);
+        }
+    }
+    
     Ok(())
 }
 
@@ -464,6 +949,8 @@ fn daily_entry() -> anyhow::Result<()> {
         wake_feeling: None,
         reality_checks: 0,
         notes: String::new(),
+        technique_practice: None,
+        wbtb_alarm_used: None,
     };
 
     println!("\n--- SLEEP LOG ---");
@@ -562,6 +1049,38 @@ fn daily_entry() -> anyhow::Result<()> {
     let mut notes = String::new();
     io::stdin().read_line(&mut notes)?;
     new_log.notes = notes.trim().to_string();
+
+    println!("\n--- WAKE BACK TO BED ---");
+    let alarms = load_alarms()?;
+    if !alarms.is_empty() {
+        println!("Active alarms:");
+        for alarm in &alarms {
+            println!("[{}] Bed: {}, Wake: {}, Awake: {} min", 
+                alarm.id, alarm.bedtime, alarm.wake_time, alarm.awake_minutes);
+        }
+        
+        print!("Did you use a WBTB alarm? (enter ID or 0 for none): ");
+        io::stdout().flush()?;
+        let mut alarm_choice = String::new();
+        io::stdin().read_line(&mut alarm_choice)?;
+        if let Ok(id) = alarm_choice.trim().parse::<u32>() {
+            if id > 0 && alarms.iter().any(|a| a.id == id) {
+                new_log.wbtb_alarm_used = Some(id);
+                
+                print!("Was it successful? (y/n): ");
+                io::stdout().flush()?;
+                let mut success = String::new();
+                io::stdin().read_line(&mut success)?;
+                
+                let mut alarms = load_alarms()?;
+                if let Some(alarm) = alarms.iter_mut().find(|a| a.id == id) {
+                    alarm.last_triggered = Some(today.clone());
+                    alarm.success = Some(success.trim().eq_ignore_ascii_case("y"));
+                }
+                save_alarms(&alarms)?;
+            }
+        }
+    }
 
     if let Some(index) = logs.iter().position(|l| l.date == today) {
         logs[index] = new_log;
@@ -675,6 +1194,10 @@ fn print_daily_summary(log: &DailyLog) {
     
     println!("Reality checks: {}", log.reality_checks);
     
+    if let Some(alarm_id) = log.wbtb_alarm_used {
+        println!("WBTB Alarm used: #{}", alarm_id);
+    }
+    
     if !log.notes.is_empty() {
         println!("Notes: {}", log.notes);
     }
@@ -742,46 +1265,5 @@ fn load_techniques() -> anyhow::Result<HashMap<String, TechniqueData>> {
 fn save_techniques(techniques: &HashMap<String, TechniqueData>) -> anyhow::Result<()> {
     let data = serde_json::to_string_pretty(techniques)?;
     fs::write(TECHNIQUES_FILE, data)?;
-    Ok(())
-}
-
-fn practice_technique(technique: Technique) -> anyhow::Result<()> {
-    let technique_name = match technique {
-        Technique::Mild => "MILD",
-        Technique::Wbtb => "WBTB",
-        Technique::Fild => "FILD",
-        Technique::Rc => "RC",
-    };
-    
-    let mut techniques = load_techniques()?;
-    let tech = techniques.get_mut(technique_name)
-        .ok_or_else(|| anyhow::anyhow!("Technique not found"))?;
-    
-    println!("\n--- Practicing {} ---", tech.name);
-    println!("{}\n", tech.description);
-    println!("Steps:");
-    for (i, step) in tech.steps.iter().enumerate() {
-        println!("{}. {}", i + 1, step);
-    }
-    
-    tech.last_practiced = Some(Utc::now().format("%Y-%m-%d").to_string());
-    save_techniques(&techniques)?;
-    
-    println!("\nPractice started at {}", Utc::now().format("%H:%M"));
-    println!("Press any key to complete practice...");
-    wait_for_keypress()?;
-    
-    println!("\n✅ Practice completed! Remember to record results in your dream journal.");
-    Ok(())
-}
-
-fn wait_for_keypress() -> anyhow::Result<()> {
-    loop {
-        if let Event::Key(event) = event::read()? {
-            if event.code != KeyCode::Null {
-                break;
-            }
-        }
-    }
     Ok(())
 }
